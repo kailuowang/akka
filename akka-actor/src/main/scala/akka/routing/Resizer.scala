@@ -309,7 +309,7 @@ private[akka] class ResizablePoolActor(supervisorStrategy: SupervisorStrategy)
   val resizerCell = context match {
     case x: ResizablePoolCell ⇒ x
     case _ ⇒
-      throw ActorInitializationException("Router actor can only be used in RoutedActorRef, not in " + context.getClass)
+      throw ActorInitializationException("Resizable actor can only be used when resizer is defined, not in " + context.getClass)
   }
 
   override def receive = ({
