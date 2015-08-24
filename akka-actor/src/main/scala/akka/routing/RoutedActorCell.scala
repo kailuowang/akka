@@ -170,8 +170,10 @@ private[akka] class RouterActor extends Actor {
       cell.removeRoutee(ActorRefRoutee(child), stopChild = false)
       stopIfAllRouteesRemoved()
     case other if routingLogicController.isDefined ⇒
-      routingLogicController.foreach(_.forward(other))
+      forwardToRoutee(other)
   }
+
+  protected def forwardToRoutee(msg: Any): Unit = routingLogicController.foreach(_.forward(msg))
 
   def stopIfAllRouteesRemoved(): Unit =
     if (cell.router.routees.isEmpty && cell.routerConfig.stopRouterWhenAllRouteesRemoved)

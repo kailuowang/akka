@@ -54,6 +54,16 @@ trait Resizer {
    * This method is invoked only in the context of the Router actor.
    */
   def resize(currentRoutees: immutable.IndexedSeq[Routee]): Int
+
+  /**
+   * A hook to call when message is forwarded to routees.
+   * This is needed by PerformanceBasedResizer to record message processing speed.
+   *
+   * CAUSTION: This method should not be invoked concurrently
+   *
+   * @param currentRoutees
+   */
+  def onMessageForwardedToRoutee(currentRoutees: immutable.IndexedSeq[Routee]): Unit
 }
 
 case object DefaultResizer {
@@ -153,6 +163,7 @@ case class DefaultResizer(
   override def resize(currentRoutees: immutable.IndexedSeq[Routee]): Int =
     capacity(currentRoutees)
 
+  override def onMessageForwardedToRoutee(currentRoutees: immutable.IndexedSeq[Routee]): Unit = ()
   /**
    * Returns the overall desired change in resizer capacity. Positive value will
    * add routees to the resizer. Negative value will remove routees from the
@@ -290,6 +301,10 @@ private[akka] final class ResizablePoolCell(
     } finally resizeInProgress.set(false)
   }
 
+  private[akka] def reportMessageForwarded(): Unit = {
+    resizer.onMessageForwardedToRoutee(router.routees)
+  }
+
 }
 
 /**
@@ -315,4 +330,10 @@ private[akka] class ResizablePoolActor(supervisorStrategy: SupervisorStrategy)
   override def receive = ({
     case Resize ⇒ resizerCell.resize(initial = false)
   }: Actor.Receive) orElse super.receive
+
+  override protected def forwardToRoutee(msg: Any): Unit = {
+    resizerCell.reportMessageForwarded()
+    super.forwardToRoutee(msg)
+  }
+
 }
