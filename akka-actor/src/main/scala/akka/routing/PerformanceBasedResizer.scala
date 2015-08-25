@@ -136,14 +136,14 @@ case class PerformanceBasedResizer(
       case x ⇒ false
     }
 
-    val processed = recentProcessingLog.headOption.map(_.queueLength).getOrElse(0) - queueLength
+    val processed = recentProcessingLog.headOption.fold(0)(_.queueLength - queueLength)
 
     val newEntry = RecentProcessingLogEntry(routees.length, queueLength + 1, processed, occupiedRoutees, LocalDateTime.now)
-    val sampling = recentProcessingLog.length > 1 &&
+
+    //Replace the last entry when it's too close to the previous entry to achieve sampling while retaining the latest status
+    val sampling = historySampleRate.toNanos > 0 && recentProcessingLog.length > 1 &&
       recentProcessingLog.tail.head.time.plus(historySampleRate).isAfter(newEntry.time) &&
-      newEntry.numOfRoutees == recentProcessingLog.head.numOfRoutees &&
-      newEntry.occupiedRoutees == recentProcessingLog.head.occupiedRoutees
-    //whether to replace the last entry if it's too close to the previous entry to achieve sampling while always retaining the latest status
+      newEntry.numOfRoutees == recentProcessingLog.head.numOfRoutees
 
     recentProcessingLog = if (sampling) {
       newEntry.aggregate(recentProcessingLog.head) +: recentProcessingLog.tail
@@ -152,7 +152,6 @@ case class PerformanceBasedResizer(
         case init :+ last if last.time.isBefore(LocalDateTime.now.minus(actionFrequency)) ⇒ init
         case l ⇒ l
       }
-
     }
 
     val fullyUtilized = occupiedRoutees == routees.length
