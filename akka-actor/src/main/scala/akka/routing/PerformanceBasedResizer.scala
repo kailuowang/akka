@@ -29,7 +29,7 @@ case object PerformanceBasedResizer {
 
   case class SizePerformanceLogEntry(poolSize: PoolSize, processSpeed: Duration, time: LocalDateTime)
 
-  case class UtilizationRecord(lastFullyUtilized: Option[LocalDateTime] = None, highestUtilization: Int = 0)
+  case class UtilizationRecord(underutilizationStreakStart: Option[LocalDateTime] = None, highestUtilization: Int = 0)
 
   type RecentProcessingLog = Vector[RecentProcessingLogEntry]
   type SizePerformanceLog = Vector[SizePerformanceLogEntry]
@@ -41,6 +41,7 @@ case object PerformanceBasedResizer {
       chanceOfScalingDownWhenFull = resizerCfg.getInt("chance-of-ramping-down-when-full"),
       actionFrequency = resizerCfg.getDuration("action-frequency"),
       retentionPeriod = resizerCfg.getDuration("retention-period"),
+      downsizeAfterUnderutilizedFor = resizerCfg.getDuration("downsize-after-underutilized-for"),
       exploreStepSize = resizerCfg.getDouble("explore-step-size"),
       explorationRatio = resizerCfg.getDouble("chance-of-exploration"),
       bufferRatio = resizerCfg.getDouble("buffer-ratio-when-downsizing"))
@@ -71,10 +72,11 @@ case class PerformanceBasedResizer(
   val upperBound: PoolSize = 30,
   val chanceOfScalingDownWhenFull: Double = 0.1,
   val actionFrequency: Duration = Duration.ofSeconds(15),
-  val retentionPeriod: Duration = Duration.ofHours(72),
+  val retentionPeriod: Duration = Duration.ofHours(24),
   val numOfAdjacentSizesToConsiderDuringOptimization: Int = 6,
   val exploreStepSize: Double = 0.1,
   val bufferRatio: Double = 0.1,
+  val downsizeAfterUnderutilizedFor: Duration = Duration.ofHours(72),
   val explorationRatio: Double = 0.4,
   val historySampleRate: Duration = Duration.ofMillis(500)) extends Resizer {
 
@@ -96,9 +98,11 @@ case class PerformanceBasedResizer(
 
     consolidateLogs(currentSize)
     val proposedChange =
-      if (performanceLog.isEmpty)
+      if (utilizationRecord.underutilizationStreakStart.fold(false)(_.isBefore(LocalDateTime.now.minus(downsizeAfterUnderutilizedFor))))
         downsize(currentSize)
-      else {
+      else if (performanceLog.isEmpty) {
+        0
+      } else {
         if (Random.nextDouble() < explorationRatio)
           explore(currentSize)
         else
@@ -158,9 +162,11 @@ case class PerformanceBasedResizer(
 
     utilizationRecord =
       if (fullyUtilized)
-        utilizationRecord.copy(lastFullyUtilized = Some(LocalDateTime.now))
+        utilizationRecord.copy(underutilizationStreakStart = None)
       else
-        utilizationRecord.copy(highestUtilization = Math.max(utilizationRecord.highestUtilization, occupiedRoutees))
+        utilizationRecord.copy(
+          underutilizationStreakStart = utilizationRecord.underutilizationStreakStart orElse Some(LocalDateTime.now),
+          highestUtilization = Math.max(utilizationRecord.highestUtilization, occupiedRoutees))
 
   }
 
@@ -180,19 +186,14 @@ case class PerformanceBasedResizer(
         case init :+ last if last.time.isBefore(oldestRetention) ⇒ init
         case l ⇒ l
       }
-
     }
-
   }
 
   private def oldestRetention = LocalDateTime.now.minus(retentionPeriod)
 
   private def downsize(currentSize: Int): Int = {
-    if (utilizationRecord.lastFullyUtilized.fold(false)(_.isBefore(oldestRetention))) {
-      val downsizeTo = (utilizationRecord.highestUtilization * (1 + bufferRatio)).toInt
-      Math.min(downsizeTo - currentSize, 0)
-    } else 0
-
+    val downsizeTo = (utilizationRecord.highestUtilization * (1 + bufferRatio)).toInt
+    Math.min(downsizeTo - currentSize, 0)
   }
 
   private def optimize(currentSize: PoolSize): Int = {
@@ -215,7 +216,11 @@ case class PerformanceBasedResizer(
     }
 
     val optimalSize = adjacentDispatchWaits.minBy(_._2)._1
-    Math.ceil((optimalSize - currentSize) / 2).toInt
+    val movement = (optimalSize - currentSize) / 2.0
+    if (movement < 0)
+      Math.floor(movement).toInt
+    else
+      Math.ceil(movement).toInt
 
   }
 
