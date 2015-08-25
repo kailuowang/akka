@@ -113,7 +113,7 @@ case class PerformanceBasedResizer(
       proposedChange
   }
 
-  def onMessageForwardedToRoutee(routees: immutable.IndexedSeq[Routee]): Unit = {
+  override def onMessageForwardedToRoutee(routees: immutable.IndexedSeq[Routee]): Unit = {
     val queueLength = (routees map {
       case ActorRefRoutee(a: ActorRefWithCell) ⇒
         a.underlying match {

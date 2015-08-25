@@ -63,7 +63,7 @@ trait Resizer {
    *
    * @param currentRoutees
    */
-  def onMessageForwardedToRoutee(currentRoutees: immutable.IndexedSeq[Routee]): Unit
+  def onMessageForwardedToRoutee(currentRoutees: immutable.IndexedSeq[Routee]): Unit = ()
 }
 
 case object DefaultResizer {
