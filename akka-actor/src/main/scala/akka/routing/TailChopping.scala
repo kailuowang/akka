@@ -133,7 +133,7 @@ final case class TailChoppingPool(
       nrOfInstances = config.getInt("nr-of-instances"),
       within = config.getMillisDuration("within"),
       interval = config.getMillisDuration("tail-chopping-router.interval"),
-      resizer = DefaultResizer.fromConfig(config),
+      resizer = Resizer.fromConfig(config),
       usePoolDispatcher = config.hasPath("pool-dispatcher"))
 
   /**

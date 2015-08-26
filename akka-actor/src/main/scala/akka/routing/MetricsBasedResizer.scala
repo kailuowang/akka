@@ -6,7 +6,7 @@ package akka.routing
 import java.time.{ Duration, LocalDateTime }
 import java.time.temporal.{ Temporal, ChronoUnit }
 
-import PerformanceBasedResizer._
+import MetricsBasedResizer._
 
 import scala.collection.immutable
 
@@ -16,7 +16,7 @@ import akka.actor._
 
 import scala.util.Random
 
-case object PerformanceBasedResizer {
+case object MetricsBasedResizer {
   type PoolSize = Int
 
   case class RecentProcessingLogEntry(numOfRoutees: PoolSize, queueLength: Int, processed: Int, occupiedRoutees: Int, time: LocalDateTime) {
@@ -34,51 +34,38 @@ case object PerformanceBasedResizer {
   type RecentProcessingLog = Vector[RecentProcessingLogEntry]
   type SizePerformanceLog = Vector[SizePerformanceLogEntry]
 
-  def apply(resizerCfg: Config): PerformanceBasedResizer =
-    PerformanceBasedResizer(
+  def apply(resizerCfg: Config): MetricsBasedResizer =
+    MetricsBasedResizer(
       lowerBound = resizerCfg.getInt("lower-bound"),
       upperBound = resizerCfg.getInt("upper-bound"),
-      chanceOfScalingDownWhenFull = resizerCfg.getInt("chance-of-ramping-down-when-full"),
-      actionFrequency = resizerCfg.getDuration("action-frequency"),
+      chanceOfScalingDownWhenFull = resizerCfg.getDouble("chance-of-ramping-down-when-full"),
+      actionInterval = resizerCfg.getDuration("action-interval"),
       retentionPeriod = resizerCfg.getDuration("retention-period"),
       downsizeAfterUnderutilizedFor = resizerCfg.getDuration("downsize-after-underutilized-for"),
       exploreStepSize = resizerCfg.getDouble("explore-step-size"),
       explorationRatio = resizerCfg.getDouble("chance-of-exploration"),
       bufferRatio = resizerCfg.getDouble("buffer-ratio-when-downsizing"))
 
-  def fromConfig(resizerConfig: Config, router: ActorRef): Option[PerformanceBasedResizer] =
-    if (resizerConfig.getBoolean("resizer.enabled"))
-      Some(PerformanceBasedResizer(resizerConfig.getConfig("resizer")))
-    else
-      None
 }
 
 /**
  * Implementation of [[Resizer]] that adjust the [[Pool]] based on performance per size.
  * It keeps the performance log so it's stateful as well as a larger memory footprint than the defaultresizer
- *
+ * For documentation about the the parameters, see the reference.conf akka.actor.deployment.default.metrics-based-resizer
  */
 @SerialVersionUID(1L)
-case class PerformanceBasedResizer(
-  /**
-   * The fewest number of routees the router should ever have.
-   */
-  val lowerBound: PoolSize = 1,
-
-  /**
- * The most number of routees the router should ever have.
- * Must be greater than or equal to `lowerBound`.
- */
-  val upperBound: PoolSize = 30,
-  val chanceOfScalingDownWhenFull: Double = 0.1,
-  val actionFrequency: Duration = Duration.ofSeconds(15),
-  val retentionPeriod: Duration = Duration.ofHours(24),
-  val numOfAdjacentSizesToConsiderDuringOptimization: Int = 6,
-  val exploreStepSize: Double = 0.1,
-  val bufferRatio: Double = 0.1,
-  val downsizeAfterUnderutilizedFor: Duration = Duration.ofHours(72),
-  val explorationRatio: Double = 0.4,
-  val historySampleRate: Duration = Duration.ofMillis(500)) extends Resizer {
+case class MetricsBasedResizer(
+  lowerBound: PoolSize = 1,
+  upperBound: PoolSize = 30,
+  chanceOfScalingDownWhenFull: Double = 0.2,
+  actionInterval: Duration = Duration.ofSeconds(15),
+  retentionPeriod: Duration = Duration.ofHours(24),
+  numOfAdjacentSizesToConsiderDuringOptimization: Int = 6,
+  exploreStepSize: Double = 0.1,
+  bufferRatio: Double = 0.2,
+  downsizeAfterUnderutilizedFor: Duration = Duration.ofHours(72),
+  explorationRatio: Double = 0.4,
+  historySampleRate: Duration = Duration.ofMillis(500)) extends Resizer {
 
   if (lowerBound < 0) throw new IllegalArgumentException("lowerBound must be >= 0, was: [%s]".format(lowerBound))
   if (upperBound < 0) throw new IllegalArgumentException("upperBound must be >= 0, was: [%s]".format(upperBound))
@@ -90,7 +77,7 @@ case class PerformanceBasedResizer(
   private[routing] var utilizationRecord: UtilizationRecord = UtilizationRecord()
 
   def isTimeForResize(messageCounter: Long): Boolean = {
-    performanceLog.headOption.fold(false)(_.time.isBefore(LocalDateTime.now.minus(actionFrequency)))
+    performanceLog.headOption.fold(false)(_.time.isBefore(LocalDateTime.now.minus(actionInterval)))
   }
 
   def resize(currentRoutees: immutable.IndexedSeq[Routee]): Int = {
@@ -153,7 +140,7 @@ case class PerformanceBasedResizer(
       newEntry.aggregate(recentProcessingLog.head) +: recentProcessingLog.tail
     } else {
       (newEntry +: recentProcessingLog) match {
-        case init :+ last if last.time.isBefore(LocalDateTime.now.minus(actionFrequency)) ⇒ init
+        case init :+ last if last.time.isBefore(LocalDateTime.now.minus(actionInterval)) ⇒ init
         case l ⇒ l
       }
     }

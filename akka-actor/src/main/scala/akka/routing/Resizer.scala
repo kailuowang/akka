@@ -7,6 +7,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+import akka.AkkaException
+import akka.event.Logging.Error.NoCause
+
 import scala.collection.immutable
 import scala.concurrent.duration._
 import scala.concurrent.duration.FiniteDuration
@@ -57,13 +60,32 @@ trait Resizer {
 
   /**
    * A hook to call when message is forwarded to routees.
-   * This is needed by PerformanceBasedResizer to record message processing speed.
+   * This is needed by MetricsBasedResizer to record message processing speed.
    *
    * CAUSTION: This method should not be invoked concurrently
    *
    * @param currentRoutees
    */
   def onMessageForwardedToRoutee(currentRoutees: immutable.IndexedSeq[Routee]): Unit = ()
+}
+
+object Resizer {
+  def fromConfig(parentConfig: Config): Option[Resizer] = {
+    val defaultResizerConfig = parentConfig.getConfig("resizer")
+    val metricsBasedResizerConfig = parentConfig.getConfig("metrics-based-resizer")
+    (defaultResizerConfig.getBoolean("enabled"), metricsBasedResizerConfig.getBoolean("enabled")) match {
+      case (true, false)  ⇒ Some(DefaultResizer(defaultResizerConfig))
+      case (false, true)  ⇒ Some(MetricsBasedResizer(metricsBasedResizerConfig))
+      case (false, false) ⇒ None
+      case (true, true) ⇒
+        throw new ResizerInitializationException(s"cannot enable both resizer and metrics-based-resizer", null)
+    }
+  }
+}
+
+@SerialVersionUID(1L)
+class ResizerInitializationException(message: String, cause: Throwable)
+  extends AkkaException(message, cause) {
 }
 
 case object DefaultResizer {
@@ -81,6 +103,7 @@ case object DefaultResizer {
       backoffRate = resizerConfig.getDouble("backoff-rate"),
       messagesPerResize = resizerConfig.getInt("messages-per-resize"))
 
+  @deprecated("User Resizer.fromConfig instead", since = "2.4.1")
   def fromConfig(resizerConfig: Config): Option[DefaultResizer] =
     if (resizerConfig.getBoolean("resizer.enabled"))
       Some(DefaultResizer(resizerConfig.getConfig("resizer")))
