@@ -66,7 +66,7 @@ trait Resizer {
    *
    * @param currentRoutees
    */
-  def onMessageForwardedToRoutee(currentRoutees: immutable.IndexedSeq[Routee]): Unit = ()
+  def onMessageForwardedToRoutee(totalQueuedMessages: Int, currentRoutees: immutable.IndexedSeq[Routee]): Unit = ()
 }
 
 object Resizer {
@@ -186,7 +186,6 @@ case class DefaultResizer(
   override def resize(currentRoutees: immutable.IndexedSeq[Routee]): Int =
     capacity(currentRoutees)
 
-  override def onMessageForwardedToRoutee(currentRoutees: immutable.IndexedSeq[Routee]): Unit = ()
   /**
    * Returns the overall desired change in resizer capacity. Positive value will
    * add routees to the resizer. Negative value will remove routees from the
@@ -303,9 +302,13 @@ private[akka] final class ResizablePoolCell(
   }
 
   override def sendMessage(envelope: Envelope): Unit = {
-    if (!routerConfig.isManagementMessage(envelope.message) &&
-      resizer.isTimeForResize(resizeCounter.getAndIncrement()) && resizeInProgress.compareAndSet(false, true)) {
-      super.sendMessage(Envelope(ResizablePoolActor.Resize, self, system))
+    if (!routerConfig.isManagementMessage(envelope.message)) {
+      super.sendMessage(Envelope(ResizablePoolActor.ReportMessageForward(ResizablePoolActor.totalQueuedMessages(router.routees)), self, system)) //calculate total queued messages here to avoid double accounting
+
+      if (resizer.isTimeForResize(resizeCounter.getAndIncrement()) && resizeInProgress.compareAndSet(false, true)) {
+        super.sendMessage(Envelope(ResizablePoolActor.Resize, self, system))
+      }
+
     }
     super.sendMessage(envelope)
   }
@@ -324,8 +327,8 @@ private[akka] final class ResizablePoolCell(
     } finally resizeInProgress.set(false)
   }
 
-  private[akka] def reportMessageForwarded(): Unit = {
-    resizer.onMessageForwardedToRoutee(router.routees)
+  private[akka] def reportMessageForwarded(totalQueuedMessages: Int): Unit = {
+    resizer.onMessageForwardedToRoutee(totalQueuedMessages, router.routees)
   }
 
 }
@@ -335,6 +338,21 @@ private[akka] final class ResizablePoolCell(
  */
 private[akka] object ResizablePoolActor {
   case object Resize extends RouterManagementMesssage
+  case class ReportMessageForward(totalQueuedMessages: Int) extends RouterManagementMesssage
+
+  def totalQueuedMessages(routees: immutable.IndexedSeq[Routee]): Int = {
+    (routees map {
+      case ActorRefRoutee(a: ActorRefWithCell) ⇒
+        a.underlying match {
+          case cell: ActorCell ⇒
+            cell.mailbox.numberOfMessages + (if (cell.currentMessage != null) 1 else 0)
+          case cell ⇒
+            cell.numberOfMessages
+        }
+      case x ⇒ 0 //todo: understand what could come here.
+    }).sum
+  }
+
 }
 
 /**
@@ -351,12 +369,9 @@ private[akka] class ResizablePoolActor(supervisorStrategy: SupervisorStrategy)
   }
 
   override def receive = ({
-    case Resize ⇒ resizerCell.resize(initial = false)
-  }: Actor.Receive) orElse super.receive
+    case Resize                                    ⇒ resizerCell.resize(initial = false)
+    case ReportMessageForward(totalQueuedMessages) ⇒ resizerCell.reportMessageForwarded(totalQueuedMessages)
 
-  override protected def forwardToRoutee(msg: Any): Unit = {
-    resizerCell.reportMessageForwarded()
-    super.forwardToRoutee(msg)
-  }
+  }: Actor.Receive) orElse super.receive
 
 }

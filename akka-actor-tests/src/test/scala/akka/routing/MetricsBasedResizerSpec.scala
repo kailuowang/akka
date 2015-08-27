@@ -1,6 +1,6 @@
 package akka.routing
 
-import java.time.{ LocalDateTime, Duration ⇒ JDuration }
+import java.time.{ Duration ⇒ JDuration, LocalDateTime }
 
 import akka.actor._
 import akka.testkit._
@@ -17,7 +17,7 @@ import scala.util.Random
 
 object MetricsBasedResizerSpec {
 
-  class TestActor(timeout: FiniteDuration = 1000.milliseconds) extends Actor {
+  class TestLatchingActor(timeout: FiniteDuration = 1000.milliseconds) extends Actor {
     def receive = {
       case latch: TestLatch ⇒
         Await.ready(latch, timeout)
@@ -25,14 +25,14 @@ object MetricsBasedResizerSpec {
   }
 
   def routee(implicit system: ActorSystem): Routee =
-    ActorRefRoutee(system.actorOf(Props(new TestActor)))
+    ActorRefRoutee(system.actorOf(Props(new TestLatchingActor)))
 
   def routees(num: Int = 10)(implicit system: ActorSystem) = (1 to num).map(_ ⇒ routee)
 
   case class TestRouter(routees: Vector[Routee], resizer: Resizer)(implicit system: ActorSystem) {
     var msgs: Set[TestLatch] = Set()
     def mockSend(l: TestLatch = TestLatch(), index: Int = Random.nextInt(routees.length))(implicit sender: ActorRef): TestLatch = {
-      resizer.onMessageForwardedToRoutee(routees)
+      resizer.onMessageForwardedToRoutee(ResizablePoolActor.totalQueuedMessages(routees), routees)
       routees(index).send(l, sender)
       msgs = msgs + l
       l
@@ -55,17 +55,25 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
 
   "MetricsBasedResizer isTimeForResize" must {
 
-    "be false with empty history" in {
+    "be true with empty history" in {
       val resizer = MetricsBasedResizer()
+      resizer.isTimeForResize(0) should ===(true)
+    }
+
+    "be false if the last resize is too close within actionInterval enough history" in {
+      val resizer = MetricsBasedResizer(actionInterval = JDuration.ofSeconds(10))
+      resizer.performanceLog = Vector(SizePerformanceLogEntry(10, JDuration.ofMillis(1), LocalDateTime.now.minusSeconds(8)),
+        SizePerformanceLogEntry(1, JDuration.ofMillis(1), LocalDateTime.now.minusSeconds(12)))
+
       resizer.isTimeForResize(100) should ===(false)
     }
 
-    "be false without enough history" in {
+    "be true if the last resize is before actionInterval ago" in {
       val resizer = MetricsBasedResizer(actionInterval = JDuration.ofSeconds(10))
-      resizer.performanceLog = Vector(SizePerformanceLogEntry(10, JDuration.ofMillis(1), LocalDateTime.now.minusSeconds(8)),
-        SizePerformanceLogEntry(6, JDuration.ofMillis(1), LocalDateTime.now.minusSeconds(5)))
+      resizer.performanceLog = Vector(SizePerformanceLogEntry(10, JDuration.ofMillis(1), LocalDateTime.now.minusSeconds(11)),
+        SizePerformanceLogEntry(6, JDuration.ofMillis(1), LocalDateTime.now.minusSeconds(12)))
 
-      resizer.isTimeForResize(100) should ===(false)
+      resizer.isTimeForResize(100) should ===(true)
     }
 
   }
@@ -74,7 +82,7 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
 
     "record recent processProcessingLog with correct routee size" in {
       val resizer = MetricsBasedResizer()
-      resizer.onMessageForwardedToRoutee(Vector(routee))
+      resizer.onMessageForwardedToRoutee(0, Vector(routee))
       resizer.recentProcessingLog.head.numOfRoutees should ===(1)
     }
 
@@ -84,7 +92,7 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
       val l = TestLatch(2)
       rt1.send(l, self)
       val rt2 = routee
-      resizer.onMessageForwardedToRoutee(Vector(rt1, rt2))
+      resizer.onMessageForwardedToRoutee(0, Vector(rt1, rt2))
       resizer.recentProcessingLog.head.numOfRoutees should ===(2)
       resizer.recentProcessingLog.head.occupiedRoutees should ===(1)
 
@@ -107,7 +115,7 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
     }
 
     "record recent processing with correct processed messages" in {
-      val resizer = MetricsBasedResizer(historySampleRate = JDuration.ofNanos(0))
+      val resizer = MetricsBasedResizer(actionInterval = JDuration.ofNanos(10))
       val router = TestRouter(Vector(routee, routee), resizer)
       val latch1 = router.mockSend()
       router.mockSend(latch1)
@@ -127,7 +135,7 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
     }
 
     "congregate immediate processing into the same log" in {
-      val resizer = MetricsBasedResizer(historySampleRate = JDuration.ofSeconds(10))
+      val resizer = MetricsBasedResizer(actionInterval = JDuration.ofSeconds(100))
       val router = TestRouter(Vector(routee), resizer)
 
       router.mockSend()
@@ -143,7 +151,7 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
     }
 
     "congregate immediate processing into the same log with correct processed message" in {
-      val resizer = MetricsBasedResizer(historySampleRate = JDuration.ofSeconds(10))
+      val resizer = MetricsBasedResizer(actionInterval = JDuration.ofSeconds(100))
       val router = TestRouter(Vector(routee), resizer)
 
       val l1 = router.mockSend()
@@ -166,7 +174,7 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
     }
 
     "collect utilizationRecord when not fully utilized" in {
-      val resizer = MetricsBasedResizer(historySampleRate = JDuration.ofSeconds(10))
+      val resizer = MetricsBasedResizer()
       val router = TestRouter(Vector(routee, routee, routee), resizer)
       router.mockSend(index = 0)
       Thread.sleep(10)
@@ -185,7 +193,7 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
     }
 
     "collect utilizationRecord when fully utilized" in {
-      val resizer = MetricsBasedResizer(historySampleRate = JDuration.ofSeconds(10))
+      val resizer = MetricsBasedResizer()
       val router = TestRouter(Vector(routee, routee), resizer)
       router.mockSend(index = 0)
       Thread.sleep(10)
@@ -310,6 +318,56 @@ class MetricsBasedResizerSpec extends AkkaSpec(ResizerSpec.config) with DefaultT
       resizer.resize(routees(10)) should be(-1)
     }
 
+  }
+
+  "MetricsBasedResizer" must {
+
+    "start with lowerbound pool size" in {
+      val resizer = MetricsBasedResizer(lowerBound = 1)
+      val router = system.actorOf(RoundRobinPool(nrOfInstances = 0, resizer = Some(resizer)).props(Props(new TestLatchingActor)))
+      router ! TestLatch(0)
+
+      Thread.sleep(10)
+
+      resizer.recentProcessingLog.head.numOfRoutees should be(resizer.lowerBound)
+    }
+
+    "move to the optimal pool size" in {
+      val optimalSize = 7
+      val resizer = MetricsBasedResizer(
+        lowerBound = 1,
+        upperBound = 100,
+        actionInterval = JDuration.ofMillis(10),
+        retentionPeriod = JDuration.ofMinutes(5))
+
+      val router = system.actorOf(RoundRobinPool(nrOfInstances = 0, resizer = Some(resizer)).props(
+        Props(new Actor {
+          def receive = {
+            case n: Int if n <= 0 ⇒ //done
+            case n: Int           ⇒ Thread.sleep((n millis).dilated.toMillis)
+          }
+        })))
+
+      def currentSize = resizer.recentProcessingLog.headOption.fold(0)(_.numOfRoutees)
+
+      def send(): Unit = {
+        val baselineWait = 1
+        val extraWait = Math.max(currentSize - optimalSize, 0) //punish when pool size go beyond optimal size
+        router ! (baselineWait + extraWait)
+      }
+
+      val numOfMessage = 5000
+      for (i ← 0 until numOfMessage) {
+        send()
+        if (i > 0 && i % 20 == 0) Thread.sleep(1) //20 messages per 1 millis
+      }
+
+      Thread.sleep(numOfMessage * 2) //takes at most such long to process
+      send()
+      Thread.sleep(10)
+      currentSize should be(optimalSize +- 2)
+
+    }
   }
 
 }

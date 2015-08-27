@@ -147,7 +147,6 @@ private[akka] class RoutedActorCell(
  * INTERNAL API
  */
 private[akka] class RouterActor extends Actor {
-
   val cell = context match {
     case x: RoutedActorCell ⇒ x
     case _ ⇒
@@ -170,10 +169,8 @@ private[akka] class RouterActor extends Actor {
       cell.removeRoutee(ActorRefRoutee(child), stopChild = false)
       stopIfAllRouteesRemoved()
     case other if routingLogicController.isDefined ⇒
-      forwardToRoutee(other)
+      routingLogicController.foreach(_.forward(other))
   }
-
-  protected def forwardToRoutee(msg: Any): Unit = routingLogicController.foreach(_.forward(msg))
 
   def stopIfAllRouteesRemoved(): Unit =
     if (cell.router.routees.isEmpty && cell.routerConfig.stopRouterWhenAllRouteesRemoved)

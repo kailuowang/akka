@@ -64,8 +64,7 @@ case class MetricsBasedResizer(
   exploreStepSize: Double = 0.1,
   bufferRatio: Double = 0.2,
   downsizeAfterUnderutilizedFor: Duration = Duration.ofHours(72),
-  explorationRatio: Double = 0.4,
-  historySampleRate: Duration = Duration.ofMillis(500)) extends Resizer {
+  explorationRatio: Double = 0.4) extends Resizer {
 
   if (lowerBound < 0) throw new IllegalArgumentException("lowerBound must be >= 0, was: [%s]".format(lowerBound))
   if (upperBound < 0) throw new IllegalArgumentException("upperBound must be >= 0, was: [%s]".format(upperBound))
@@ -76,14 +75,17 @@ case class MetricsBasedResizer(
   private[routing] var performanceLog: SizePerformanceLog = Vector.empty
   private[routing] var utilizationRecord: UtilizationRecord = UtilizationRecord()
 
+  val historySampleRate: Duration = actionInterval dividedBy 100
+
   def isTimeForResize(messageCounter: Long): Boolean = {
-    performanceLog.headOption.fold(false)(_.time.isBefore(LocalDateTime.now.minus(actionInterval)))
+    performanceLog.headOption.fold(true)(_.time.isBefore(LocalDateTime.now.minus(actionInterval)))
   }
 
   def resize(currentRoutees: immutable.IndexedSeq[Routee]): Int = {
     val currentSize = currentRoutees.length
 
     consolidateLogs(currentSize)
+
     val proposedChange =
       if (utilizationRecord.underutilizationStreakStart.fold(false)(_.isBefore(LocalDateTime.now.minus(downsizeAfterUnderutilizedFor))))
         downsize(currentSize)
@@ -104,18 +106,7 @@ case class MetricsBasedResizer(
       proposedChange
   }
 
-  override def onMessageForwardedToRoutee(routees: immutable.IndexedSeq[Routee]): Unit = {
-    val queueLength = (routees map {
-      case ActorRefRoutee(a: ActorRefWithCell) ⇒
-        a.underlying match {
-          case cell: ActorCell ⇒
-            cell.mailbox.numberOfMessages + (if (cell.currentMessage != null) 1 else 0)
-          case cell ⇒
-            cell.numberOfMessages
-        }
-      case x ⇒ 0
-    }).sum
-
+  override def onMessageForwardedToRoutee(queueLength: Int, routees: immutable.IndexedSeq[Routee]): Unit = {
     val occupiedRoutees = routees count {
       case ActorRefRoutee(a: ActorRefWithCell) ⇒
         a.underlying match {
@@ -162,9 +153,8 @@ case class MetricsBasedResizer(
       le.fullyUtilized && le.numOfRoutees == currentSize
     }
 
-    if (relevantProcessingLogs.length >= 2) {
-
-      val totalProcessed = relevantProcessingLogs.map(_.processed).sum
+    val totalProcessed = relevantProcessingLogs.map(_.processed).sum
+    if (totalProcessed > 0 && relevantProcessingLogs.length >= 2) {
       val duration = Duration.between(relevantProcessingLogs.last.time, relevantProcessingLogs.head.time)
       val speed = duration dividedBy totalProcessed
       val newEntry = SizePerformanceLogEntry(currentSize, speed, LocalDateTime.now)
